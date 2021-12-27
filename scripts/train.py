@@ -5,7 +5,7 @@ import torch
 
 from utils.models import Model
 from utils.utils import getLogger
-
+import yaml
 
 logger = getLogger(__name__)
 
@@ -17,25 +17,25 @@ def main():
     # parse the configurations
     parser = argparse.ArgumentParser(description='Additioal configurations for training',
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('--gpu_ids',
-                        type=str,
-                        default='-1',
-                        help='IDs of GPUs to use (please use `,` to split multiple IDs); -1 means CPU only')
+    # parser.add_argument('--gpu_ids',
+    #                     type=str,
+    #                     default='-1',
+    #                     help='IDs of GPUs to use (please use `,` to split multiple IDs); -1 means CPU only')
     parser.add_argument('--tr_list',
-                        type=str,
-                        required=True,
-                        help='Path to the list of training files')
+                         type=str,
+                         required=False,  # True
+                         help='Path to the list of training files')
     parser.add_argument('--cv_file',
                         type=str,
-                        required=True,
+                        required=False,  # True
                         help='Path to the cross validation file')
     parser.add_argument('--ckpt_dir',
                         type=str,
-                        required=True,
+                        required=False,  # True
                         help='Name of the directory to dump checkpoint')
     parser.add_argument('--unit',
                         type=str,
-                        required=True,
+                        required=False,  # True
                         help='Unit of sample, can be either `seg` or `utt`')
     parser.add_argument('--logging_period',
                         type=int,
@@ -85,16 +85,31 @@ def main():
                         type=str,
                         default='loss.txt',
                         help='Filename of the loss log')
-    parser.add_argument('--resume_model',
+    parser.add_argument('--pretrained_model',
                         type=str,
                         default='',
                         help='Existing model to resume training from')
 
     args = parser.parse_args()
-    logger.info('Arguments in command:\n{}'.format(pprint.pformat(vars(args))))
+    args = vars(args)
+
+
+
+    if args['tr_list'] ==None:
+        config_file = "../config/train.yaml"
+        with open(config_file, "r") as ymlfile:
+            args_yaml = yaml.load(ymlfile, Loader=yaml.FullLoader)
+            for key,value in args.items():
+                if key in args_yaml.keys():
+                    args[key]=args_yaml[key]
+            for key in args_yaml.keys():
+                if key not in args.keys():
+                    args[key]=args_yaml[key]
+
+    logger.info('Arguments in command:\n{}'.format(pprint.pformat((args))))
 
     model = Model()
-    model.train(args) 
+    model.train(args)
 
 
 if __name__ == '__main__':

@@ -33,6 +33,8 @@ class CheckPoint(object):
         if not os.path.isfile(filename):
             raise FileNotFoundError('No checkpoint found at {}'.format(filename))
         ckpt = torch.load(filename, map_location=device)
+        #torch.load('my_file.pt', map_location=lambda storage, loc: storage)
+        #ckpt = torch.load(filename, map_location=lambda storage, loc: storage)
         self.ckpt_info = ckpt.ckpt_info 
         self.net_state_dict = ckpt.net_state_dict
         self.optim_state_dict = ckpt.optim_state_dict
@@ -47,41 +49,67 @@ class Model(object):
 
         self.win_size = int(self.win_len * self.sample_rate)
         self.hop_size = int(self.hop_len * self.sample_rate)
+
+        self.tr_parallel = False
         
     def train(self, args):
-        with open(args.tr_list, 'r') as f:
+
+        with open(args['tr_list'], 'r') as f:
             self.tr_list = [line.strip() for line in f.readlines()]
         self.tr_size = len(self.tr_list)
-        self.cv_file = args.cv_file
-        self.ckpt_dir = args.ckpt_dir
-        self.logging_period = args.logging_period
-        self.resume_model = args.resume_model
-        self.time_log = args.time_log
-        self.lr = args.lr
-        self.lr_decay_factor = args.lr_decay_factor
-        self.lr_decay_period = args.lr_decay_period
-        self.clip_norm = args.clip_norm
-        self.max_n_epochs = args.max_n_epochs
-        self.batch_size = args.batch_size
-        self.buffer_size = args.buffer_size
-        self.loss_log = args.loss_log
-        self.unit = args.unit
-        self.segment_size = args.segment_size
-        self.segment_shift = args.segment_shift
+        self.cv_file = args['cv_file']
+        self.ckpt_dir = args['ckpt_dir']
+        self.logging_period = args['logging_period']
+        self.pretrained_model = args['pretrained_model']
+        self.time_log = args['time_log']
+        self.lr = args['lr']
+        self.lr_decay_factor = args['lr_decay_factor']
+        self.lr_decay_period = args['lr_decay_period']
+        self.clip_norm = args['clip_norm']
+        self.max_n_epochs = args['max_n_epochs']
+        self.batch_size = args['batch_size']
+        self.buffer_size = args['buffer_size']
+        self.loss_log = args['loss_log']
+        self.unit = args['unit']
+        self.segment_size = args['segment_size']
+        self.segment_shift = args['segment_shift']
+        self.tr_parallel = args['tr_parallel']
 
-        self.gpu_ids = tuple(map(int, args.gpu_ids.split(',')))
+        self.gpu_ids =  tuple(map(int, args['gpu_ids'].split(',')))
         if len(self.gpu_ids) == 1 and self.gpu_ids[0] == -1:
             # cpu only
             self.device = torch.device('cpu')
         else:
             # gpu
             self.device = torch.device('cuda:{}'.format(self.gpu_ids[0]))
+            #self.device = torch.device("cuda")
+
+        # if torch.cuda.is_available():
+        #     self.device = torch.device("cuda")
+        # else:
+        #     self.device = torch.device("cpu")
+        self.device= torch.device("cpu")
+        if "tr_parallel" in args:
+            if (self.device==torch.device("cpu") and args['tr_parallel']==True):
+                self.tr_parallel=False
+
+
+        logger = getLogger(os.path.join(self.ckpt_dir, 'train.log'), log_file=True)
+
+        # create a network
+        net = Net()
+        logger.info('Model summary:\n{}'.format(net))
+
+        net = net.to(self.device)
+        if len(self.gpu_ids) > 1 and self.device == torch.device("cuda"):
+            net = DataParallel(net, device_ids=self.gpu_ids)
+
+        if self.tr_parallel ==True:
+            net = DataParallel(net)
 
         if not os.path.isdir(self.ckpt_dir):
             os.makedirs(self.ckpt_dir)
 
-        logger = getLogger(os.path.join(self.ckpt_dir, 'train.log'), log_file=True)
-        
         # create data loaders for training and cross validation
         tr_loader = AudioLoader(self.tr_list, self.sample_rate, self.unit,
                                 self.segment_size, self.segment_shift,
@@ -92,13 +120,6 @@ class Model(object):
                                 batch_size=1, buffer_size=10,
                                 in_norm=self.in_norm, mode='eval')
 
-        # create a network
-        net = Net()
-        logger.info('Model summary:\n{}'.format(net))
-
-        net = net.to(self.device)
-        if len(self.gpu_ids) > 1:
-            net = DataParallel(net, device_ids=self.gpu_ids)
 
         # calculate model size
         param_count = numParams(net)
@@ -113,10 +134,10 @@ class Model(object):
         scheduler = lr_scheduler.StepLR(optimizer, step_size=self.lr_decay_period, gamma=self.lr_decay_factor)
         
         # resume model if needed
-        if self.resume_model:
-            logger.info('Resuming model from {}'.format(self.resume_model))
+        if self.pretrained_model:
+            logger.info('pretrained_model model from {}'.format(self.pretrained_model))
             ckpt = CheckPoint()
-            ckpt.load(self.resume_model, self.device)
+            ckpt.load(self.pretrained_model, self.device)
             state_dict = {}
             for key in ckpt.net_state_dict:
                 if len(self.gpu_ids) > 1:
@@ -137,8 +158,11 @@ class Model(object):
                          'best_loss': float('inf')}
         
         start_iter = 0
+        #ckpt_info['cur_epoch']=0
         # train model
         while ckpt_info['cur_epoch'] < self.max_n_epochs:
+            epoch_info = '{}'.format(ckpt_info['cur_epoch'])
+            print('turns: ',epoch_info)
             accu_tr_loss = 0.
             accu_n_frames = 0
             net.train()
@@ -155,13 +179,15 @@ class Model(object):
                 n_frames = countFrames(n_samples, self.win_size, self.hop_size)
 
                 start_time = timeit.default_timer()
-                
+
                 # prepare features and labels
                 feat, lbl = feeder(mix, sph)
                 loss_mask = lossMask(shape=lbl.shape, n_frames=n_frames, device=self.device)
                 # forward + backward + optimize
                 optimizer.zero_grad()
                 with torch.enable_grad():
+                    if hasattr(torch.cuda, 'empty_cache'):
+                        torch.cuda.empty_cache()
                     est = net(feat)
                 loss = criterion(est, lbl, loss_mask, n_frames)
                 loss.backward()
@@ -185,12 +211,14 @@ class Model(object):
                     print('Epoch [{}/{}], Iter [{}], tr_loss = {:.4f} / {:.4f}, batch_time (s) = {:.4f}'.format(ckpt_info['cur_epoch']+1,
                         self.max_n_epochs, n_iter, running_loss, accu_tr_loss / accu_n_frames, batch_time), flush=True)
  
-        
-                if (n_iter + 1) % self.logging_period == 0:
+                print(' n_iter=',n_iter)
+
+                #if (n_iter + 1) % self.logging_period == 0:
+                if (n_iter + 1) == self.tr_size // self.batch_size:
                     avg_tr_loss = accu_tr_loss / accu_n_frames
                     avg_cv_loss = self.validate(net, cv_loader, criterion, feeder)
                     net.train()
-                
+
                     ckpt_info['cur_iter'] = n_iter
                     is_best = True if avg_cv_loss < ckpt_info['best_loss'] else False
                     ckpt_info['best_loss'] = avg_cv_loss if is_best else ckpt_info['best_loss']
@@ -207,7 +235,7 @@ class Model(object):
                         logger.info('Saving checkpoint into {}'.format(os.path.join(self.ckpt_dir, best_model)))
                     logger.info('Epoch [{}/{}], ( tr_loss: {:.4f} | cv_loss: {:.4f} )\n'.format(ckpt_info['cur_epoch']+1,
                         self.max_n_epochs, avg_tr_loss, avg_cv_loss))
-                    
+
                     model_path = os.path.join(self.ckpt_dir, 'models')
                     if not os.path.isdir(model_path):
                         os.makedirs(model_path)
@@ -215,16 +243,16 @@ class Model(object):
                     ckpt.save(os.path.join(model_path, latest_model),
                               is_best,
                               os.path.join(model_path, best_model))
-                    
+
                     lossLog(os.path.join(self.ckpt_dir, self.loss_log), ckpt, self.logging_period)
-            
+
                     accu_tr_loss = 0.
                     accu_n_frames = 0
 
-                    if n_iter + 1 == self.tr_size // self.batch_size:
-                        start_iter = 0
-                        ckpt_info['cur_iter'] = 0
-                        break
+                    # if n_iter + 1 == self.tr_size // self.batch_size:
+                    #     start_iter = 0
+                    #     ckpt_info['cur_iter'] = 0
+                    #     break
                     
             ckpt_info['cur_epoch'] += 1
             scheduler.step() # learning rate decay
@@ -264,13 +292,13 @@ class Model(object):
         return avg_cv_loss
                 
     def test(self, args):
-        with open(args.tt_list, 'r') as f:
+        with open(args['tt_list'], 'r') as f:
             self.tt_list = [line.strip() for line in f.readlines()]
-        self.model_file = args.model_file
-        self.ckpt_dir = args.ckpt_dir
-        self.est_path = args.est_path
-        self.write_ideal = args.write_ideal
-        self.gpu_ids = tuple(map(int, args.gpu_ids.split(',')))
+        self.model_file = args['model_file']
+        self.ckpt_dir = args['ckpt_dir']
+        self.est_path = args['est_path']
+        self.write_ideal = args['write_ideal']
+        self.gpu_ids = tuple(map(int, args['gpu_ids'].split(',')))
         if len(self.gpu_ids) == 1 and self.gpu_ids[0] == -1:
             # cpu only
             self.device = torch.device('cpu')
@@ -305,14 +333,30 @@ class Model(object):
         logger.info('Loading model from {}'.format(self.model_file))
         ckpt = CheckPoint()
         ckpt.load(self.model_file, self.device)
-        net.load_state_dict(ckpt.net_state_dict)
+        #net.load_state_dict(ckpt.net_state_dict)
+
+        #ckpt.load(self.pretrained_model, self.device)
+        state_dict = {}
+        for key in ckpt.net_state_dict:
+            if len(self.gpu_ids) > 1:
+                state_dict['module.' + key] = ckpt.net_state_dict[key]
+            else:
+                state_dict[key[7:]] = ckpt.net_state_dict[key]
+        net.load_state_dict(state_dict)
+
+
         logger.info('model info: epoch {}, iter {}, cv_loss - {:.4f}\n'.format(ckpt.ckpt_info['cur_epoch']+1,
             ckpt.ckpt_info['cur_iter']+1, ckpt.ckpt_info['cv_loss']))
         
         net.eval()
-        for i in range(len(self.tt_list)):
+        #for i in range(len(self.tt_list)):
+        for i in range(1):
             # create a data loader for testing
-            tt_loader = AudioLoader(self.tt_list[i], self.sample_rate, unit='utt',
+            # cv_loader = AudioLoader(self.cv_file, self.sample_rate, unit='utt',
+            #                         segment_size=None, segment_shift=None,
+            #                         batch_size=1, buffer_size=10,
+            #                         in_norm=self.in_norm, mode='eval')
+            tt_loader = AudioLoader(args['tt_file'], self.sample_rate, unit='utt',
                                     segment_size=None, segment_shift=None,
                                     batch_size=1, buffer_size=10,
                                     in_norm=self.in_norm, mode='eval')

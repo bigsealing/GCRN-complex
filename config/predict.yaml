@@ -1,0 +1,6 @@
+gpu_ids: '0'
+model_file: './exp/models/latest.pt'
+write_ideal: False
+ckpt_dir: exp
+tt_file: '../data/datasets/tt/cv.ex'
+tt_list: '../filelists/tt_list.txt'

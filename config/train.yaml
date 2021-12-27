@@ -1,0 +1,15 @@
+gpu_ids: '0'
+tr_list: '../filelists/tr_list.txt'
+cv_file: '../data/datasets/cv/cv.ex'
+ckpt_dir: exp
+logging_period: 1000
+clip_norm: 5.0
+lr: 0.001
+time_log: './time.log'
+unit: utt
+batch_size: 16
+buffer_size: 16
+max_n_epochs: 1000
+pretrained_model: 'exp/models/latest.pt'
+tr_parallel: False
+pretrained_model_mode: 'GPU'
